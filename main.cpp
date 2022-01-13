@@ -11,27 +11,47 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/io.h>
+#include <semaphore.h>
+
+
+#if !defined(DEBUG) && !defined(RELEASE)
+#define DEBUG
+#endif
 
 #define F_INPUT 1
-#define F_HANDLED 4
-#define F_SUCCESS 2
 #pragma pack(1)
 struct sysio_message_t {
     uint8_t umask; // D0 - 1 ввод, 0 - вывод; D1 - 1 успешно
     uint8_t value;
     uint16_t port;
 };
-#pragma pack()
+
+struct mmap_data {
+    sem_t event1;
+    sem_t event2;
+    sysio_message_t d;
+};
 
 union iodata {
     sysio_message_t msg;
     std::array<uint8_t, sizeof (sysio_message_t)> d;
 };
+#pragma pack()
+
 
 
 int main(int argc, char *argv[])
 {
     QCoreApplication a(argc, argv);
+
+#ifndef DEBUG
+    if(iopl(3) == -1)
+    {
+        perror("iopl");
+        return 1;
+    }
+#endif
+
 
     const char * fname = "/tmp/sysioctl";
 
@@ -44,7 +64,7 @@ int main(int argc, char *argv[])
         if(mkfifo(fname, 0777))
         {
             perror("File pipe for sysioctl is not created");
-            return 0;
+            return 1;
         }
     }
 
@@ -55,7 +75,6 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    iopl(3);
 
     char buf[4096];
     do {
@@ -73,43 +92,67 @@ int main(int argc, char *argv[])
                     return;
                 }
 
-                if(ftruncate(shm, sizeof (sysio_message_t)) == -1) {
+                if(ftruncate(shm, sizeof (mmap_data)) == -1) {
                     perror("ftruncate");
                     return;
                 }
 
-                void * addr = mmap(0, sizeof(sysio_message_t), PROT_WRITE | PROT_READ, MAP_SHARED, shm, 0);
+                void * addr = mmap(0, sizeof(mmap_data), PROT_WRITE | PROT_READ, MAP_SHARED, shm, 0);
                 if(addr == MAP_FAILED)
                 {
                     perror("mmap");
                     return;
                 }
 
-                sysio_message_t * msg = (sysio_message_t*)addr;
+                mmap_data * mdata = (mmap_data*)addr;
+                sysio_message_t * shm_data = &mdata->d;
+                sem_t * event1 = &mdata->event1;
+                sem_t * event2 = &mdata->event2;
+
+                if(sem_init(event1, 1, 0) != 0)
+                {
+                    perror("sem_init");
+                    return;
+                }
+
+                if(sem_init(event2, 1, 0) != 0)
+                {
+                    perror("sem_init");
+                    return;
+                }
+
+                qDebug() << "memory name:" << memory_name;
+
+                int cnt = 0;
                 do {
-                    if(!(msg->umask & F_HANDLED))
+                    if(sem_wait(event1) == 0)
                     {
-                        if(msg->port > 0)
+                        if(shm_data->port > 0)
                         {
-                            msg->umask &= ~F_SUCCESS;
-                            if(msg->umask & F_INPUT)
+                            if(shm_data->umask & F_INPUT)
                             {
-                                qDebug() << "input:" << msg->port;
-                                msg->value = inb(msg->port);
-                                msg->umask |= F_SUCCESS;
+#ifdef DEBUG
+                                qDebug() << "i:" << shm_data->port;
+                                shm_data->value = ++cnt;
+#else
+                                shm_data->value = inb(shm_data->port);
+#endif
                             }
                             else
-                            {
-                                qDebug() << "output:" << msg->value << msg->port;
-                                outb(msg->value, msg->port);
-                                msg->umask |= F_SUCCESS;
+                            {  
+#ifdef DEBUG
+                                qDebug() << "o:" << shm_data->value << shm_data->port;
+#else
+                                outb(shm_data->value, shm_data->port);
+#endif
                             }
                         }
-                        msg->umask |= F_HANDLED;
+
+                        sem_post(event2);
                     }
                 } while(1);
 
-                munmap(addr, sizeof(sysio_message_t));
+                munmap(addr, sizeof(mmap_data));
                 close(shm);
             });
 
