@@ -1,8 +1,4 @@
 #include <QCoreApplication>
-#include <QFileInfo>
-#include <QMap>
-#include <QDebug>
-
 
 #include <thread>
 #include <fcntl.h>
@@ -12,11 +8,13 @@
 #include <sys/types.h>
 #include <sys/io.h>
 #include <semaphore.h>
+#include <iostream>
 
+#include <sysioctl.h>
 
-#if !defined(DEBUG) && !defined(RELEASE)
-#define DEBUG
-#endif
+namespace  {
+    std::map<QString, std::thread*> memo;
+}
 
 #define F_INPUT 1
 #pragma pack(1)
@@ -31,13 +29,92 @@ struct mmap_data {
     sem_t event2;
     sysio_message_t d;
 };
-
-union iodata {
-    sysio_message_t msg;
-    std::array<uint8_t, sizeof (sysio_message_t)> d;
-};
 #pragma pack()
 
+void log(const QString & str) {
+    std::cout << str.toStdString() << std::endl;
+}
+
+void log(const QString & mname, const QString & s) {
+    log(QString("[%1] %2").arg(mname).arg(s));
+}
+
+void log(const QString & mname, const QString & s, const QString & errstr) {
+    log(mname, QString("%1 (%2)").arg(s).arg(errstr));
+}
+
+
+
+void init_shm(const QString & memory_name) {
+    memo.insert({ memory_name, new std::thread([memory_name]{
+        int shm = 0;
+
+        if((shm = shm_open(memory_name.toStdString().c_str(), O_CREAT | O_RDWR, 0777)) == -1) {
+            log(memory_name, "shm_open", strerror(errno));
+            return;
+        }
+
+        if(ftruncate(shm, sizeof (mmap_data)) == -1) {
+            log(memory_name, "ftruncate", strerror(errno));
+            return;
+        }
+
+        void * addr = mmap(0, sizeof(mmap_data), PROT_WRITE | PROT_READ, MAP_SHARED, shm, 0);
+        if(addr == MAP_FAILED)
+        {
+            log(memory_name, "mmap", strerror(errno));
+            return;
+        }
+
+        mmap_data * mdata = (mmap_data*)addr;
+        sysio_message_t * shm_data = &mdata->d;
+        sem_t * event1 = &mdata->event1;
+        sem_t * event2 = &mdata->event2;
+
+        if(sem_init(event1, 1, 0) != 0 || sem_init(event2, 1, 0) != 0)
+        {
+            log(memory_name, "sem_init", strerror(errno));
+            return;
+        }
+
+        log(memory_name, "initialized shared memory");
+
+        while(1)
+        {
+            if(sem_wait(event1) == 0)
+            {
+                if(shm_data->port > 0)
+                {
+                    if(shm_data->umask & F_INPUT)
+                    {
+                        log(memory_name, "input", QString("port(%1)").arg(shm_data->port));
+#ifdef DEBUG
+                        ++shm_data->value;
+#else
+                        shm_data->value = inb(shm_data->port);
+#endif
+                    }
+                    else
+                    {
+                        log(memory_name, "output", QString("val(%1) : port(%2)").arg(shm_data->value).arg(shm_data->port));
+#ifdef RELEASE
+                        outb(shm_data->value, shm_data->port);
+#endif
+                    }
+                }
+
+                sem_post(event2);
+            }
+        }
+
+        munmap(addr, sizeof(mmap_data));
+        close(shm);
+
+        log(memory_name, "shared memory destroyed");
+    })});
+
+    log(memory_name, "new handler created");
+}
 
 
 int main(int argc, char *argv[])
@@ -47,11 +124,15 @@ int main(int argc, char *argv[])
 #ifndef DEBUG
     if(iopl(3) == -1)
     {
-        perror("iopl");
+        log(QString("iopl: %1 (%2)").arg("privelege is not taken").arg(strerror(errno)));
         return 1;
     }
 #endif
 
+    for(int i = 1; i < argc; i++)
+    {
+        init_shm(argv[i]);
+    }
 
     const char * fname = "/tmp/sysioctl";
 
@@ -63,7 +144,7 @@ int main(int argc, char *argv[])
 
         if(mkfifo(fname, 0777))
         {
-            perror("File pipe for sysioctl is not created");
+            log("FATAL: failure to create FIFO /tmp/sysioctl file");
             return 1;
         }
     }
@@ -79,84 +160,14 @@ int main(int argc, char *argv[])
     char buf[4096];
     do {
         memset(buf, '\0', sizeof buf);
-        int r = read(fd, buf, sizeof buf);
-        if(r)
+        if(read(fd, buf, sizeof buf))
         {
-            QString memory_name(buf);
+            if(memo.count(buf)) {
+                log(buf, "skip shared memory allocation", "shared memory already exists");
+                continue;
+            }
 
-            new std::thread([memory_name]{
-                int shm = 0;
-
-                if((shm = shm_open(memory_name.toStdString().c_str(), O_CREAT | O_RDWR, 0777)) == -1) {
-                    perror("shm_open");
-                    return;
-                }
-
-                if(ftruncate(shm, sizeof (mmap_data)) == -1) {
-                    perror("ftruncate");
-                    return;
-                }
-
-                void * addr = mmap(0, sizeof(mmap_data), PROT_WRITE | PROT_READ, MAP_SHARED, shm, 0);
-                if(addr == MAP_FAILED)
-                {
-                    perror("mmap");
-                    return;
-                }
-
-                mmap_data * mdata = (mmap_data*)addr;
-                sysio_message_t * shm_data = &mdata->d;
-                sem_t * event1 = &mdata->event1;
-                sem_t * event2 = &mdata->event2;
-
-                if(sem_init(event1, 1, 0) != 0)
-                {
-                    perror("sem_init");
-                    return;
-                }
-
-                if(sem_init(event2, 1, 0) != 0)
-                {
-                    perror("sem_init");
-                    return;
-                }
-
-                qDebug() << "memory name:" << memory_name;
-
-                int cnt = 0;
-                do {
-                    if(sem_wait(event1) == 0)
-                    {
-                        if(shm_data->port > 0)
-                        {
-                            if(shm_data->umask & F_INPUT)
-                            {
-#ifdef DEBUG
-                                qDebug() << "i:" << shm_data->port;
-                                shm_data->value = ++cnt;
-#else
-                                shm_data->value = inb(shm_data->port);
-#endif
-                            }
-                            else
-                            {  
-#ifdef DEBUG
-                                qDebug() << "o:" << shm_data->value << shm_data->port;
-#else
-                                outb(shm_data->value, shm_data->port);
-#endif
-                            }
-                        }
-
-                        sem_post(event2);
-                    }
-                } while(1);
-
-                munmap(addr, sizeof(mmap_data));
-                close(shm);
-            });
-
-            // not join, threads will be killed by OS, couse threads include infinity's cicle's
+            init_shm(buf);
         }
     }
     while (1);
