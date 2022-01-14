@@ -1,6 +1,7 @@
 #ifndef SYSIOCTL_H
+#define SYSIOCTL_H
 
-#define SYS_IO_CTL
+
 #ifdef SYS_IO
 bool sysioctl_init();
 
