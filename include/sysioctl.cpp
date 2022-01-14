@@ -82,12 +82,12 @@ bool sysioctl_init()
         int fdioctl = open("/tmp/sysioctl", O_WRONLY);
         if(fdioctl)
         {
-            std::string appname = QString(QCoreApplication::applicationName()+"_shm").toStdString();
+            std::string appname = QString(QCoreApplication::applicationName()+"_shmt").toStdString();
             write(fdioctl, appname.c_str(), appname.size());
 
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-            if((shm = shm_open(appname.c_str(), O_CREAT | O_RDWR, 0777)) == -1)
+            if((shm = shm_open(appname.c_str(), O_RDWR, 0777)) == -1)
             {
                 perror("shm_open");
             }

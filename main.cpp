@@ -10,8 +10,6 @@
 #include <semaphore.h>
 #include <iostream>
 
-#include <sysioctl.h>
-
 namespace  {
     std::map<QString, std::thread*> memo;
 }
@@ -49,7 +47,7 @@ void init_shm(const QString & memory_name) {
     memo.insert({ memory_name, new std::thread([memory_name]{
         int shm = 0;
 
-        if((shm = shm_open(memory_name.toStdString().c_str(), O_CREAT | O_RDWR, 0777)) == -1) {
+        if((shm = shm_open(memory_name.toStdString().c_str(), O_CREAT | O_RDWR | O_TRUNC, 0777)) == -1) {
             log(memory_name, "shm_open", strerror(errno));
             return;
         }
@@ -58,6 +56,8 @@ void init_shm(const QString & memory_name) {
             log(memory_name, "ftruncate", strerror(errno));
             return;
         }
+
+        fchmod(shm, S_IRWXU | S_IRWXG | S_IRWXO);
 
         void * addr = mmap(0, sizeof(mmap_data), PROT_WRITE | PROT_READ, MAP_SHARED, shm, 0);
         if(addr == MAP_FAILED)
@@ -79,6 +79,9 @@ void init_shm(const QString & memory_name) {
 
         log(memory_name, "initialized shared memory");
 
+#ifdef DEBUG
+        int cnt = 0;
+#endif
         while(1)
         {
             if(sem_wait(event1) == 0)
@@ -89,7 +92,7 @@ void init_shm(const QString & memory_name) {
                     {
                         log(memory_name, "input", QString("port(%1)").arg(shm_data->port));
 #ifdef DEBUG
-                        ++shm_data->value;
+                        shm_data->value = cnt++;
 #else
                         shm_data->value = inb(shm_data->port);
 #endif
@@ -116,6 +119,7 @@ void init_shm(const QString & memory_name) {
     log(memory_name, "new handler created");
 }
 
+#include <QProcess>
 
 int main(int argc, char *argv[])
 {
@@ -144,10 +148,12 @@ int main(int argc, char *argv[])
 
         if(mkfifo(fname, 0777))
         {
-            log("FATAL: failure to create FIFO /tmp/sysioctl file");
+            log(QString("FATAL: failure to create FIFO /tmp/sysioctl file (%1)").arg(strerror(errno)));
             return 1;
         }
     }
+
+    chmod("/tmp/sysioctl", S_IRWXU | S_IRWXG | S_IRWXO);
 
     int fd = open(fname, O_RDONLY);
     if(!fd)
@@ -155,7 +161,6 @@ int main(int argc, char *argv[])
         remove(fname);
         return 1;
     }
-
 
     char buf[4096];
     do {
